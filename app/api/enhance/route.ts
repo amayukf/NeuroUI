@@ -1,3 +1,4 @@
+import "@/lib/sdk-init"; // MUST be first — redirects SDK data dir to /tmp on serverless
 import { NextRequest, NextResponse } from "next/server";
 import { Agent } from "@cursor/sdk";
 import { mkdtempSync, rmSync } from "node:fs";

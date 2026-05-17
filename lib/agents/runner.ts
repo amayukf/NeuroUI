@@ -1,3 +1,4 @@
+import "../sdk-init"; // MUST be first — redirects SDK data dir to /tmp on serverless
 import { Agent, CursorAgentError } from "@cursor/sdk";
 import type { SDKMessage } from "@cursor/sdk";
 import { readSandboxFile } from "../sandbox";
