@@ -1,65 +1,40 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
-import { Loader2, RefreshCw, AlertCircle, Code2 } from "lucide-react";
+import { Loader2, RefreshCw, AlertCircle } from "lucide-react";
 import type { CodeFile } from "./CodeView";
 
 interface PreviewProps {
   files: CodeFile[];
 }
 
-// ── 1. Sanitise agent output ──────────────────────────────────────────────────
-// The agent sometimes wraps output in markdown fences, adds prose before the
-// first import, or uses smart-quote characters that break the TypeScript parser.
+// ── Sanitise ──────────────────────────────────────────────────────────
 function sanitiseCode(raw: string): string {
   if (!raw) return "";
   let s = raw;
-
-  // Extract content from the first fenced code block if present
-  const fenced = s.match(
-    /```(?:tsx?|jsx?|typescript|javascript|typescriptreact|javascriptreact)?\r?\n([\s\S]*?)```/
-  );
-  if (fenced) {
-    s = fenced[1];
-  }
-
-  // Strip any remaining standalone fence lines
+  const fenced = s.match(/```(?:tsx?|jsx?|typescript|javascript)?\r?\n([\s\S]*?)```/);
+  if (fenced) s = fenced[1];
   s = s.split("\n").filter((l) => !/^\s*```/.test(l)).join("\n");
-
-  // Normalise smart quotes → ASCII (breaks TypeScript parsers)
   s = s
     .replace(/[\u2018\u2019\u201A\u201B]/g, "'")
-    .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
-    .replace(/\u2013/g, "-")
-    .replace(/\u2014/g, "--");
-
-  // If the file doesn't start with code, find the first real code line
+    .replace(/[\u201C\u201D\u201E\u201F]/g, '"');
   const t = s.trim();
   if (!/^(import|export|const|function|class|type|interface|\/\/|\/\*|"use)/.test(t)) {
     const idx = s.search(/^(import|export|const|function|class)\s/m);
     if (idx > 0) s = s.slice(idx);
   }
-
   return s.trim();
 }
 
-// ── 2. Prepare the module code ────────────────────────────────────────────────
-// Strip the user's react/recharts/lucide imports (we inject canonical ones at
-// the top), remove `export default` so the App symbol stays in scope, then
-// append the createRoot mount + error boundary.
+// ── Build the module code that runs inside the iframe ─────────────────
 function buildModuleCode(sanitised: string): string {
   let code = sanitised
-    // Remove any react imports (we inject them)
     .replace(/^import\s+React[\s,{][^;]*from\s+['"]react['"];\s*\n/gm, "")
     .replace(/^import\s+\{[^}]+\}\s+from\s+['"]react['"];\s*\n/gm, "")
     .replace(/^import\s+type\s+\{[^}]+\}\s+from\s+['"]react['"];\s*\n/gm, "")
-    // Remove recharts imports (we inject them)
     .replace(/^import\s+\{[^}]+\}\s+from\s+['"]recharts['"];\s*\n/gm, "")
-    // Remove lucide-react imports (we inject them)
     .replace(/^import\s+\{[^}]+\}\s+from\s+['"]lucide-react['"];\s*\n/gm, "")
-    // Remove `export default` before function/class/const so App stays in scope
     .replace(/^export\s+default\s+(function|class|const|let|var)\s+App/gm, "$1 App")
-    // Remove bare `export default App;`
     .replace(/^export\s+default\s+App\s*;?\s*$/gm, "");
 
   return `\
@@ -70,9 +45,8 @@ import{
   PieChart,Pie,Cell,XAxis,YAxis,CartesianGrid,
   Tooltip,Legend,ResponsiveContainer,
   RadarChart,Radar,PolarGrid,PolarAngleAxis,
-  ScatterChart,Scatter,ZAxis,
-  ComposedChart,FunnelChart,Funnel,LabelList,
-  ReferenceLine,ReferenceArea
+  ScatterChart,Scatter,ZAxis,ComposedChart,
+  ReferenceLine,ReferenceArea,LabelList
 }from'recharts';
 import{
   TrendingUp,TrendingDown,Users,DollarSign,Activity,Settings,
@@ -86,11 +60,13 @@ import{
   Send,Paperclip,Image,Video,Mic,Volume2,Play,Pause,
   Github,Twitter,Linkedin,ExternalLink,Link,Copy,
   Maximize,Minimize,Sidebar,Layout,AlignLeft,AlignRight,
-  Bold,Italic,Type,Hash,AtSign,Slash,MoreHorizontal,MoreVertical,
+  Type,Hash,AtSign,MoreHorizontal,MoreVertical,
   FileText,Folder,FolderOpen,Save,PlusCircle,MinusCircle,
-  User,UserPlus,UserMinus,UserCheck,Map,Navigation,Compass,
+  User,UserPlus,UserMinus,UserCheck,Navigation,
   MessageCircle,MessageSquare,Flag,Award,Gift,Truck,
-  ShoppingCart,ShoppingBag,CreditCard,Wallet,Banknote
+  ShoppingCart,ShoppingBag,CreditCard,Wallet,Banknote,
+  Map,Compass,Bold,Italic,Slash,Dot,HelpCircle,
+  ToggleLeft,ToggleRight,Sliders,Radio,CheckSquare
 }from'lucide-react';
 
 ${code}
@@ -98,9 +74,13 @@ ${code}
 ;(()=>{
   const el=document.getElementById('root');
   if(!el)return;
+
   class EB extends React.Component{
     constructor(p){super(p);this.state={err:null};}
     static getDerivedStateFromError(e){return{err:e};}
+    componentDidCatch(e){
+      window.parent?.postMessage({type:'preview-error',message:String(e.message)},'*');
+    }
     render(){
       if(this.state.err){
         return React.createElement('div',{
@@ -109,9 +89,10 @@ ${code}
         },
           React.createElement('div',{style:{color:'#fb7185',fontWeight:600,marginBottom:8}},
             'Runtime error in generated component'),
-          React.createElement('pre',{style:{whiteSpace:'pre-wrap',color:'#fca5a5',
-            background:'#1a1a1a',padding:12,borderRadius:6,border:'1px solid #2a2a2a',
-            overflow:'auto'}},String(this.state.err.stack||this.state.err.message||this.state.err)),
+          React.createElement('pre',{
+            style:{whiteSpace:'pre-wrap',color:'#fca5a5',background:'#1a1a1a',
+                   padding:12,borderRadius:6,border:'1px solid #2a2a2a',overflow:'auto'}
+          },String(this.state.err.stack||this.state.err.message||this.state.err)),
           React.createElement('p',{style:{marginTop:12,color:'#71717a',fontSize:11}},
             'Regenerate or check the Code tab.')
         );
@@ -119,22 +100,35 @@ ${code}
       return this.props.children;
     }
   }
+
+  // Wrapper sends postMessage AFTER React's first paint (useEffect fires post-commit)
+  function ReadyNotifier({children}){
+    useEffect(()=>{
+      window.parent?.postMessage({type:'preview-ready'},'*');
+    },[]);
+    return children;
+  }
+
   const AppComp=typeof App!=='undefined'?App:
-    ()=>React.createElement('div',{style:{color:'#71717a',padding:24,fontFamily:'ui-sans-serif,system-ui,sans-serif'}},'No App component found');
+    ()=>React.createElement('div',{
+      style:{color:'#71717a',padding:24,fontFamily:'ui-sans-serif,system-ui,sans-serif'}
+    },'No App component found');
+
   const root=createRoot(el);
-  root.render(React.createElement(EB,null,React.createElement(AppComp)));
+  root.render(
+    React.createElement(EB,null,
+      React.createElement(ReadyNotifier,null,
+        React.createElement(AppComp)
+      )
+    )
+  );
 })();
 `;
 }
 
-// ── 3. Build the full srcdoc HTML ─────────────────────────────────────────────
-// importmap  → tells the browser where to fetch bare import specifiers
-// tailwind   → CDN script for class-based styling
-// babel      → transforms TSX + TypeScript in the browser, then creates a
-//              <script type="module"> blob that the importmap resolves
+// ── Build the full srcdoc HTML ─────────────────────────────────────────
 function buildSrcdoc(appCode: string): string {
   const moduleCode = buildModuleCode(appCode)
-    // Prevent the HTML parser from closing the <script> tag early
     .replace(/<\/script>/gi, "<\\/script>");
 
   return `<!DOCTYPE html>
@@ -154,7 +148,21 @@ function buildSrcdoc(appCode: string): string {
   }
 }
 </script>
-<script>window.tailwind={config:{darkMode:'class'}};</script>
+<script>
+window.tailwind={config:{darkMode:'class'}};
+// Catch unhandled errors + rejected promises → notify parent → show error in iframe
+window.addEventListener('error',function(e){
+  window.parent&&window.parent.postMessage({type:'preview-error',message:String(e.message||e)},'*');
+  var r=document.getElementById('root');
+  if(r&&!r.innerHTML)r.innerHTML='<div style="padding:24px;color:#fca5a5;font-family:ui-monospace,monospace;font-size:12px;background:#0f0f0f;min-height:100vh"><b style="color:#fb7185">Script error</b><pre style="margin-top:8px;white-space:pre-wrap">'+String(e.message)+'</pre></div>';
+});
+window.addEventListener('unhandledrejection',function(e){
+  var msg=e.reason&&e.reason.message?e.reason.message:String(e.reason);
+  window.parent&&window.parent.postMessage({type:'preview-error',message:msg},'*');
+  var r=document.getElementById('root');
+  if(r&&!r.innerHTML)r.innerHTML='<div style="padding:24px;color:#fca5a5;font-family:ui-monospace,monospace;font-size:12px;background:#0f0f0f;min-height:100vh"><b style="color:#fb7185">Module error</b><pre style="margin-top:8px;white-space:pre-wrap">'+msg+'</pre></div>';
+});
+</script>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/@babel/standalone@7.24.7/babel.min.js"></script>
 <style>
@@ -172,60 +180,67 @@ ${moduleCode}
 </html>`;
 }
 
-// ── 4. React component ────────────────────────────────────────────────────────
+// ── React component ────────────────────────────────────────────────────
 export function Preview({ files }: PreviewProps) {
-  // Find and sanitise the App.tsx (agent writes it as /src/App.tsx)
   const srcdoc = useMemo(() => {
     const appFile =
       files.find((f) => f.path === "/src/App.tsx") ??
       files.find((f) => f.path === "/App.tsx") ??
       files.find((f) => f.path.endsWith("App.tsx"));
-
     if (!appFile?.contents?.trim()) return "";
     const clean = sanitiseCode(appFile.contents);
     if (!clean) return "";
     return buildSrcdoc(clean);
   }, [files]);
 
-  // Debug: log what we send so you can confirm in DevTools
-  useEffect(() => {
-    const appFile = files.find((f) => f.path.endsWith("App.tsx"));
-    console.log("[Preview] files received:", files.map((f) => f.path));
-    console.log("[Preview] App.tsx snippet:", appFile?.contents?.slice(0, 120));
-    console.log("[Preview] srcdoc length:", srcdoc.length);
-  }, [files, srcdoc]);
-
-  const [status, setStatus] = useState<"idle" | "loading" | "ready">("idle");
+  // "ready" is now set by postMessage from inside the iframe AFTER React renders,
+  // not by onLoad (which fires before esm.sh packages are downloaded).
+  const [status, setStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [iframeError, setIframeError] = useState<string | null>(null);
   const [tookTooLong, setTookTooLong] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Reset state whenever the srcdoc (= code) changes
+  // Listen for messages from the iframe
+  useEffect(() => {
+    const handler = (e: MessageEvent) => {
+      if (e.data?.type === "preview-ready") {
+        if (timerRef.current) clearTimeout(timerRef.current);
+        setStatus("ready");
+        setIframeError(null);
+        setTookTooLong(false);
+      }
+      if (e.data?.type === "preview-error") {
+        if (timerRef.current) clearTimeout(timerRef.current);
+        setIframeError(e.data.message ?? "Unknown error");
+        setStatus("error");
+      }
+    };
+    window.addEventListener("message", handler);
+    return () => window.removeEventListener("message", handler);
+  }, []);
+
+  // Reset whenever code changes
   useEffect(() => {
     if (!srcdoc) { setStatus("idle"); return; }
     setStatus("loading");
+    setIframeError(null);
     setTookTooLong(false);
-
-    // "Taking too long?" nudge after 18 s
-    timerRef.current = setTimeout(() => setTookTooLong(true), 18_000);
-    return () => {
-      if (timerRef.current) clearTimeout(timerRef.current);
-    };
-  }, [srcdoc]);
-
-  const handleLoad = useCallback(() => {
     if (timerRef.current) clearTimeout(timerRef.current);
-    setStatus("ready");
-    setTookTooLong(false);
-  }, []);
+    timerRef.current = setTimeout(() => setTookTooLong(true), 20_000);
+    return () => { if (timerRef.current) clearTimeout(timerRef.current); };
+  }, [srcdoc]);
 
   const handleRefresh = useCallback(() => {
     if (!iframeRef.current || !srcdoc) return;
     setStatus("loading");
+    setIframeError(null);
     setTookTooLong(false);
-    // Reassign srcdoc to force a reload
-    iframeRef.current.srcdoc = srcdoc;
-    timerRef.current = setTimeout(() => setTookTooLong(true), 18_000);
+    iframeRef.current.srcdoc = "";
+    requestAnimationFrame(() => {
+      if (iframeRef.current) iframeRef.current.srcdoc = srcdoc;
+    });
+    timerRef.current = setTimeout(() => setTookTooLong(true), 20_000);
   }, [srcdoc]);
 
   if (!srcdoc) {
@@ -242,19 +257,18 @@ export function Preview({ files }: PreviewProps) {
 
   return (
     <div className="relative flex h-full flex-col bg-[#0f0f0f]">
-      {/* The iframe — always mounted so it starts loading immediately */}
+      {/* iframe always mounted — loading happens in background */}
       <iframe
         ref={iframeRef}
-        key={srcdoc.slice(0, 200)}   // remount only when App code changes
+        key={srcdoc.slice(0, 200)}
         srcDoc={srcdoc}
         title="Component preview"
         sandbox="allow-scripts allow-same-origin"
-        onLoad={handleLoad}
         className="flex-1 border-0 bg-[#0f0f0f]"
         style={{ width: "100%", height: "100%" }}
       />
 
-      {/* Refresh button — always visible */}
+      {/* Refresh button */}
       <button
         onClick={handleRefresh}
         title="Refresh preview"
@@ -264,18 +278,18 @@ export function Preview({ files }: PreviewProps) {
         <RefreshCw className="h-3.5 w-3.5" />
       </button>
 
-      {/* Loading overlay — non-blocking; sits on top until iframe fires onLoad */}
+      {/* Loading overlay — hidden only after postMessage from iframe */}
       {status === "loading" && (
-        <div className="pointer-events-none absolute inset-0 z-20 flex flex-col items-center justify-center bg-[#0f0f0f]">
+        <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-[#0f0f0f]">
           <Loader2 className="h-7 w-7 animate-spin text-violet-400" />
           <p className="mt-3 text-sm text-[#71717a]">Rendering preview…</p>
           <p className="mt-1 text-[11px] text-[#52525b]">
-            Loading React + Recharts via CDN (cached after first load)
+            Loading React + Recharts via CDN (fast after first load)
           </p>
           {tookTooLong && (
             <button
               onClick={handleRefresh}
-              className="pointer-events-auto mt-5 inline-flex items-center gap-1.5 rounded-lg border border-[#2a2a2a] bg-[#1a1a1a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-white hover:border-[#3a3a3a] active:scale-95 transition-all"
+              className="mt-5 inline-flex items-center gap-1.5 rounded-lg border border-[#2a2a2a] bg-[#1a1a1a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-white active:scale-95 transition-all"
             >
               <RefreshCw className="h-3.5 w-3.5" />
               Taking too long? Retry
@@ -284,14 +298,41 @@ export function Preview({ files }: PreviewProps) {
         </div>
       )}
 
-      {/* TEMP debug strip — remove once preview is confirmed working */}
-      <div className="shrink-0 border-t border-[#1a1a1a] bg-[#080808] px-3 py-1.5 font-mono text-[10px] text-[#52525b]">
-        <span className="text-[#71717a]">Files: </span>{files.filter(f => f.path.endsWith(".tsx")).length}
+      {/* Error panel — shown when iframe sends preview-error message */}
+      {status === "error" && iframeError && (
+        <div className="absolute inset-0 z-20 overflow-y-auto bg-[#0f0f0f] p-6">
+          <div className="mx-auto max-w-lg">
+            <div className="mb-4 flex items-center gap-2">
+              <AlertCircle className="h-5 w-5 text-rose-400" />
+              <span className="text-sm font-semibold text-rose-300">Preview failed to render</span>
+            </div>
+            <pre className="whitespace-pre-wrap rounded-lg border border-rose-500/20 bg-[#1a1a1a] p-4 font-mono text-[11px] leading-relaxed text-rose-200/80">
+              {iframeError}
+            </pre>
+            <button
+              onClick={handleRefresh}
+              className="mt-4 inline-flex items-center gap-1.5 rounded-lg border border-[#2a2a2a] bg-[#1a1a1a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-white active:scale-95 transition-all"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              Retry
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Debug strip */}
+      <div className="shrink-0 border-t border-[#1a1a1a] bg-[#080808] px-3 py-1 font-mono text-[10px] text-[#52525b]">
+        <span className="text-[#71717a]">Files: </span>
+        {files.filter((f) => f.path.endsWith(".tsx")).length}
         <span className="mx-2 text-[#1a1a1a]">|</span>
         <span className="text-[#71717a]">Renderer: </span>srcdoc+Babel+esm.sh
         <span className="mx-2 text-[#1a1a1a]">|</span>
         <span className="text-[#71717a]">Status: </span>
-        <span className={status === "ready" ? "text-emerald-400" : status === "loading" ? "text-violet-400" : "text-[#52525b]"}>
+        <span className={
+          status === "ready" ? "text-emerald-400" :
+          status === "error" ? "text-rose-400" :
+          status === "loading" ? "text-violet-400" : "text-[#52525b]"
+        }>
           {status}
         </span>
       </div>
