@@ -112,8 +112,15 @@ ${code}
   class EB extends React.Component {
     constructor(p) { super(p); this.state = { err: null }; }
     static getDerivedStateFromError(e) { return { err: e }; }
-    componentDidCatch(e) {
-      window.parent && window.parent.postMessage({ type: 'preview-error', message: String(e.message) }, '*');
+    componentDidCatch(e, info) {
+      window.parent && window.parent.postMessage({
+        type: 'preview-error',
+        message: String(e.message || e),
+        stack: String(e.stack || ''),
+        componentStack: String((info && info.componentStack) || ''),
+        source: 'EB',
+        reactVersion: React && React.version,
+      }, '*');
     }
     render() {
       if (this.state.err) {
@@ -170,32 +177,35 @@ function buildSrcdoc(compiledJS: string): string {
     "react/jsx-runtime": "https://esm.sh/react@18.3.1/jsx-runtime",
     "react-dom":         "https://esm.sh/react-dom@18.3.1",
     "react-dom/client":  "https://esm.sh/react-dom@18.3.1/client",
-    "recharts":          "https://esm.sh/recharts@2.13.3?bundle-deps",
-    "lucide-react":      "https://esm.sh/lucide-react@0.460.0?bundle-deps"
+    "recharts":          "https://esm.sh/recharts@2.13.3?external=react,react-dom",
+    "lucide-react":      "https://esm.sh/lucide-react@0.460.0?external=react"
   }
 }
 </script>
 <script>
 // Catch errors in cross-origin module imports (esm.sh) before React mounts
 window.addEventListener('error', function(e) {
+  var stack = (e.error && e.error.stack) ? String(e.error.stack) : '';
+  var msg = String(e.message || (e.error && e.error.message) || e);
   var r = document.getElementById('root');
   if (r && !r.hasChildNodes()) {
     r.innerHTML = '<div style="padding:24px;color:#fca5a5;font-family:ui-monospace,monospace;font-size:12px;background:#0f0f0f;min-height:100vh">' +
       '<b style="color:#fb7185">Error loading preview</b>' +
       '<pre style="margin-top:8px;white-space:pre-wrap;background:#1a1a1a;padding:12px;border-radius:6px">' +
-      (e.message || String(e)) + '</pre></div>';
+      msg + (stack ? '\\n\\n' + stack : '') + '</pre></div>';
   }
-  window.parent && window.parent.postMessage({ type: 'preview-error', message: String(e.message || e) }, '*');
+  window.parent && window.parent.postMessage({ type: 'preview-error', message: msg, stack: stack, source: 'window.error' }, '*');
 });
 window.addEventListener('unhandledrejection', function(e) {
   var msg = e.reason && e.reason.message ? e.reason.message : String(e.reason);
+  var stack = (e.reason && e.reason.stack) ? String(e.reason.stack) : '';
   var r = document.getElementById('root');
   if (r && !r.hasChildNodes()) {
     r.innerHTML = '<div style="padding:24px;color:#fca5a5;font-family:ui-monospace,monospace;font-size:12px;background:#0f0f0f;min-height:100vh">' +
       '<b style="color:#fb7185">Module error</b>' +
-      '<pre style="margin-top:8px;white-space:pre-wrap;background:#1a1a1a;padding:12px;border-radius:6px">' + msg + '</pre></div>';
+      '<pre style="margin-top:8px;white-space:pre-wrap;background:#1a1a1a;padding:12px;border-radius:6px">' + msg + (stack ? '\\n\\n' + stack : '') + '</pre></div>';
   }
-  window.parent && window.parent.postMessage({ type: 'preview-error', message: msg }, '*');
+  window.parent && window.parent.postMessage({ type: 'preview-error', message: msg, stack: stack, source: 'unhandledrejection' }, '*');
 });
 </script>
 <script>window.tailwind = { config: { darkMode: 'class' } };</script>
@@ -223,12 +233,13 @@ export function Preview({ files }: PreviewProps) {
   const [compileError, setCompileError] = useState<string | null>(null);
   const [status, setStatus] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [iframeError, setIframeError] = useState<string | null>(null);
+  const [iframeStack, setIframeStack] = useState<string | null>(null);
   const [tookTooLong, setTookTooLong] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
-  // Extract and sanitise App.tsx from files
+  // Extract App.tsx from files
   const rawCode = useMemo(() => {
     const f =
       files.find((f) => f.path === "/src/App.tsx") ??
@@ -278,11 +289,15 @@ export function Preview({ files }: PreviewProps) {
         if (timerRef.current) clearTimeout(timerRef.current);
         setStatus("ready");
         setIframeError(null);
+        setIframeStack(null);
         setTookTooLong(false);
       }
       if (e.data?.type === "preview-error") {
         if (timerRef.current) clearTimeout(timerRef.current);
         setIframeError(e.data.message ?? "Unknown error");
+        setIframeStack(
+          [e.data.stack, e.data.componentStack].filter(Boolean).join("\n\n") || null
+        );
         setStatus("error");
       }
     };
@@ -386,7 +401,7 @@ export function Preview({ files }: PreviewProps) {
       {/* Runtime error overlay */}
       {status === "error" && iframeError && (
         <div className="absolute inset-0 z-20 overflow-y-auto bg-[#0f0f0f] p-6">
-          <div className="mx-auto max-w-lg">
+          <div className="mx-auto max-w-2xl">
             <div className="mb-4 flex items-center gap-2">
               <AlertCircle className="h-5 w-5 text-rose-400" />
               <span className="text-sm font-semibold text-rose-300">Preview runtime error</span>
@@ -394,6 +409,14 @@ export function Preview({ files }: PreviewProps) {
             <pre className="whitespace-pre-wrap rounded-lg border border-rose-500/20 bg-[#1a1a1a] p-4 font-mono text-[11px] leading-relaxed text-rose-200/80">
               {iframeError}
             </pre>
+            {iframeStack && (
+              <details className="mt-3" open>
+                <summary className="cursor-pointer text-xs text-[#71717a] hover:text-[#a1a1aa]">Full stack / component stack</summary>
+                <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded-lg border border-[#2a2a2a] bg-[#0a0a0a] p-3 font-mono text-[10px] leading-relaxed text-[#a1a1aa]">
+                  {iframeStack}
+                </pre>
+              </details>
+            )}
             <button
               onClick={handleRefresh}
               className="mt-4 inline-flex items-center gap-1.5 rounded-lg border border-[#2a2a2a] bg-[#1a1a1a] px-3 py-1.5 text-xs text-[#a1a1aa] hover:text-white active:scale-95 transition-all"
